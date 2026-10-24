@@ -1,0 +1,39 @@
+name: Supervision Cron
+
+on:
+  schedule:
+    - cron: "45 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  supervise-service:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and boot supervised container
+        run: |
+          docker build -t diamond-valuation-supervision:latest .
+          docker run -d --name diamond-supervision -p 8000:8000 diamond-valuation-supervision:latest
+          for i in $(seq 1 25); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Verify health, batch valuation, and carat/GIA drift supervision
+        run: |
+          curl -fsS http://127.0.0.1:8000/health | tee health.json
+          for c in 0.65 0.85 1.05 1.25 1.55 1.85; do
+            curl -fsS -X POST http://127.0.0.1:8000/predict \
+              -H "Content-Type: application/json" \
+              -d "{\"carat\":$c,\"cut\":\"Ideal\",\"color\":\"F\",\"clarity\":\"VS1\",\"depth\":61.8,\"table\":57.0,\"x\":6.5,\"y\":6.5,\"z\":4.0}" > /dev/null
+          done
+          curl -fsS http://127.0.0.1:8000/monitor/drift | tee drift.json
+          python -c "import json; d=json.load(open('drift.json')); assert d['status'] in ('healthy', 'drift_detected'), d; assert 'carat' in d['numerical_features']"
+
+      - name: Tear down container
+        if: always()
+        run: docker rm -f diamond-supervision || true
